@@ -1,0 +1,395 @@
+--[[
+    ╔═══════════════════════════════════════════════╗
+    ║        AIMCORE MOD TRACKER v2.0               ║
+    ║        MADE BY THE AIMCORE OWNER @bqlsh        ║
+    ╚═══════════════════════════════════════════════╝
+
+    INSTRUCTIONS:
+    1. Replace WEBHOOK_URL with your Discord webhook URL
+    2. Make sure ?wait=true is NOT added manually (handled in code)
+    3. Run the script in your executor
+    4. The script will auto-track all mods and edit the webhook message live
+]]
+
+-- ════════════════════════════════════════════════════
+--                   CONFIGURATION
+-- ════════════════════════════════════════════════════
+
+local WEBHOOK_URL    = "https://discord.com/api/webhooks/1480067386403983526/-VGD4i2njcRtHsa4Ykdg1tOXSfPkSasJ1Mg4-l5TO7X7fPEJ_Xeo0dvQs8XnIWF_3Jlb"  -- << REPLACE THIS
+local CHECK_INTERVAL = 5   -- How often (seconds) to refresh status
+local BOT_USERNAME   = "AimCore Mod Tracker"
+local BOT_AVATAR     = "https://i.imgur.com/AfFp7pu.png" -- optional avatar
+
+-- ════════════════════════════════════════════════════
+--                   MOD LIST
+-- ════════════════════════════════════════════════════
+
+local MODS = {
+    { Username = "Uveals",             UserId = 158374605   },
+    { Username = "hahabrazy",          UserId = 7978467591  },
+    { Username = "downtocIown",        UserId = 4226506845  },
+    { Username = "taowsg",             UserId = 3010656315  },
+    { Username = "Not_Ausstinn",       UserId = 180434077   },
+    { Username = "Vienyx",             UserId = 478848349   },
+    { Username = "ousfey",             UserId = 7171389384  },
+    { Username = "don_iie",            UserId = 164100188   },
+    { Username = "MarcoXDDDDDD",       UserId = 163180763   },
+    { Username = "illac17",            UserId = 549095619   },
+    { Username = "XportNz",            UserId = 224264658   },
+    { Username = "Realinq",            UserId = 99268362    },
+    { Username = "Knaurll",            UserId = 131577796   },
+    { Username = "ILove_YukkiAsuna",   UserId = 3161872154  },
+    { Username = "61Q_Fr0st",          UserId = 1602256048  },
+    { Username = "Riptide_Fr0st",      UserId = 1302259915  },
+    { Username = "kentfla",            UserId = 219021541   },
+    { Username = "mrmatash",           UserId = 39560492    },
+    { Username = "Pyrixl",             UserId = 475975042   },
+    { Username = "LeFouTrolleur",      UserId = 877654864   },
+    { Username = "SStormix",           UserId = 754154414   },
+    { Username = "Gleamier",           UserId = 31598456    },
+    { Username = "IronedIron",         UserId = 1399517213  },
+    { Username = "LiamGame09",         UserId = 113947873   },
+    { Username = "CraZyComManDer04",   UserId = 133321104   },
+    { Username = "SenseiWarrior",      UserId = 15941965    },
+    { Username = "Nosniy",             UserId = 20349956    },
+    { Username = "nekoanims",          UserId = 780350915   },
+}
+
+-- ════════════════════════════════════════════════════
+--                   SERVICES
+-- ════════════════════════════════════════════════════
+
+local HttpService  = game:GetService("HttpService")
+local StarterGui   = game:GetService("StarterGui")
+local RunService   = game:GetService("RunService")
+
+-- ════════════════════════════════════════════════════
+--                   STATE TRACKING
+-- ════════════════════════════════════════════════════
+
+local webhookMessageId  = nil   -- Stored message ID for edits
+local previousStatuses  = {}    -- Track previous status per UserId
+local sessionStart      = os.time()
+
+-- Presence type → readable string + emoji
+local PRESENCE_MAP = {
+    [0] = { label = "OFFLINE",  emoji = "⚫" },
+    [1] = { label = "ONLINE",   emoji = "🟢" },
+    [2] = { label = "INGAME",   emoji = "🎮" },
+    [3] = { label = "INSTUDIO", emoji = "🔵" },
+}
+
+-- ════════════════════════════════════════════════════
+--                   HELPER FUNCTIONS
+-- ════════════════════════════════════════════════════
+
+-- Safe HTTP request wrapper (supports syn.request, http.request, request)
+local function httpRequest(options)
+    if syn and syn.request then
+        return syn.request(options)
+    elseif http and http.request then
+        return http.request(options)
+    elseif request then
+        return request(options)
+    else
+        error("[AimCore] No HTTP function available in your executor!")
+    end
+end
+
+-- Format seconds into HH:MM:SS
+local function formatUptime(seconds)
+    local h = math.floor(seconds / 3600)
+    local m = math.floor((seconds % 3600) / 60)
+    local s = seconds % 60
+    return string.format("%02d:%02d:%02d", h, m, s)
+end
+
+-- Get current timestamp string
+local function getTimestamp()
+    return os.date("%Y-%m-%d %H:%M:%S UTC")
+end
+
+-- ════════════════════════════════════════════════════
+--           ROBLOX PRESENCE API FETCH
+-- ════════════════════════════════════════════════════
+
+local function fetchPresences()
+    -- Collect all UserIds
+    local userIds = {}
+    for _, mod in ipairs(MODS) do
+        table.insert(userIds, mod.UserId)
+    end
+
+    local body = HttpService:JSONEncode({ userIds = userIds })
+
+    local ok, response = pcall(function()
+        return httpRequest({
+            Url     = "https://presence.roblox.com/v1/presence/users",
+            Method  = "POST",
+            Headers = {
+                ["Content-Type"] = "application/json",
+                ["Accept"]       = "application/json",
+            },
+            Body = body,
+        })
+    end)
+
+    if not ok then
+        warn("[AimCore] Failed to reach Roblox Presence API: " .. tostring(response))
+        return nil
+    end
+
+    if response.StatusCode ~= 200 then
+        warn("[AimCore] Presence API returned status " .. tostring(response.StatusCode))
+        return nil
+    end
+
+    local decoded = HttpService:JSONDecode(response.Body)
+    return decoded.userPresences
+end
+
+-- ════════════════════════════════════════════════════
+--           BUILD DISCORD EMBED CONTENT
+-- ════════════════════════════════════════════════════
+
+local function buildEmbedContent(presences)
+    -- Map userId → presenceType for fast lookup
+    local presenceMap = {}
+    for _, p in ipairs(presences) do
+        presenceMap[p.userId] = p.userPresenceType or 0
+    end
+
+    -- Separate mods into buckets
+    local ingame  = {}
+    local online  = {}
+    local offline = {}
+
+    for _, mod in ipairs(MODS) do
+        local pType = presenceMap[mod.UserId] or 0
+        local bucket
+        if pType == 2 or pType == 3 then
+            bucket = ingame
+        elseif pType == 1 then
+            bucket = online
+        else
+            bucket = offline
+        end
+        table.insert(bucket, { mod = mod, pType = pType })
+    end
+
+    -- Build fields string
+    local lines = {}
+
+    -- INGAME section
+    if #ingame > 0 then
+        table.insert(lines, "🎮 **── IN-GAME ──**")
+        for _, entry in ipairs(ingame) do
+            local info = PRESENCE_MAP[entry.pType] or PRESENCE_MAP[0]
+            table.insert(lines, string.format(
+                "%s `USERNAME:` **%s**\n   `USERID:  ` **%d**\n   `STATUS:  ` **%s**",
+                info.emoji,
+                entry.mod.Username,
+                entry.mod.UserId,
+                info.label
+            ))
+        end
+    end
+
+    -- ONLINE section
+    if #online > 0 then
+        if #lines > 0 then table.insert(lines, "") end
+        table.insert(lines, "🟢 **── ONLINE ──**")
+        for _, entry in ipairs(online) do
+            local info = PRESENCE_MAP[entry.pType] or PRESENCE_MAP[0]
+            table.insert(lines, string.format(
+                "%s `USERNAME:` **%s**\n   `USERID:  ` **%d**\n   `STATUS:  ` **%s**",
+                info.emoji,
+                entry.mod.Username,
+                entry.mod.UserId,
+                info.label
+            ))
+        end
+    end
+
+    -- OFFLINE section
+    if #offline > 0 then
+        if #lines > 0 then table.insert(lines, "") end
+        table.insert(lines, "⚫ **── OFFLINE ──**")
+        for _, entry in ipairs(offline) do
+            local info = PRESENCE_MAP[entry.pType] or PRESENCE_MAP[0]
+            table.insert(lines, string.format(
+                "%s `USERNAME:` **%s**\n   `USERID:  ` **%d**\n   `STATUS:  ` **%s**",
+                info.emoji,
+                entry.mod.Username,
+                entry.mod.UserId,
+                info.label
+            ))
+        end
+    end
+
+    -- Summary counts
+    local summary = string.format(
+        "🎮 InGame: **%d** | 🟢 Online: **%d** | ⚫ Offline: **%d**",
+        #ingame, #online, #offline
+    )
+
+    -- Uptime
+    local uptime = formatUptime(os.time() - sessionStart)
+
+    -- Assemble embed
+    local embed = {
+        title       = "🔍 AimCore Mod Tracker — Live Status",
+        description = table.concat(lines, "\n"),
+        color       = 0x9B59B6, -- Purple to match AimCore theme
+        footer      = {
+            text = string.format(
+                "Made by the AimCore Owner @bqlsh  •  Uptime: %s  •  %s",
+                uptime,
+                getTimestamp()
+            )
+        },
+        fields = {
+            {
+                name   = "📊 Summary",
+                value  = summary,
+                inline = false,
+            }
+        }
+    }
+
+    return embed
+end
+
+-- ════════════════════════════════════════════════════
+--           DISCORD WEBHOOK SEND / EDIT
+-- ════════════════════════════════════════════════════
+
+local function sendOrEditWebhook(embed)
+    local payload = HttpService:JSONEncode({
+        username   = BOT_USERNAME,
+        avatar_url = BOT_AVATAR,
+        embeds     = { embed },
+    })
+
+    -- If we have a message ID, PATCH (edit) it — no spam
+    if webhookMessageId then
+        local ok, res = pcall(function()
+            return httpRequest({
+                Url     = WEBHOOK_URL .. "/messages/" .. webhookMessageId,
+                Method  = "PATCH",
+                Headers = { ["Content-Type"] = "application/json" },
+                Body    = payload,
+            })
+        end)
+        if not ok then
+            warn("[AimCore] Failed to edit webhook message: " .. tostring(res))
+            webhookMessageId = nil -- Reset so it tries to create a new one
+        end
+    else
+        -- POST new message with ?wait=true to get message ID back
+        local ok, res = pcall(function()
+            return httpRequest({
+                Url     = WEBHOOK_URL .. "?wait=true",
+                Method  = "POST",
+                Headers = { ["Content-Type"] = "application/json" },
+                Body    = payload,
+            })
+        end)
+
+        if ok and res and res.StatusCode == 200 then
+            local data = HttpService:JSONDecode(res.Body)
+            webhookMessageId = data.id
+            print("[AimCore] Webhook message created. ID: " .. tostring(webhookMessageId))
+        else
+            warn("[AimCore] Failed to send initial webhook.")
+        end
+    end
+end
+
+-- ════════════════════════════════════════════════════
+--           CHANGE DETECTION
+-- ════════════════════════════════════════════════════
+
+-- Returns true if any status changed (forces a webhook update)
+local function detectChanges(presences)
+    local changed = false
+    for _, p in ipairs(presences) do
+        local uid   = p.userId
+        local pType = p.userPresenceType or 0
+        if previousStatuses[uid] ~= pType then
+            local prev    = PRESENCE_MAP[previousStatuses[uid] or 0]
+            local current = PRESENCE_MAP[pType]
+            -- Find username for the log
+            local uname = tostring(uid)
+            for _, mod in ipairs(MODS) do
+                if mod.UserId == uid then
+                    uname = mod.Username
+                    break
+                end
+            end
+            print(string.format(
+                "[AimCore] STATUS CHANGE → %s (%d): %s → %s",
+                uname, uid,
+                prev and prev.label or "?",
+                current and current.label or "?"
+            ))
+            previousStatuses[uid] = pType
+            changed = true
+        end
+    end
+    return changed
+end
+
+-- ════════════════════════════════════════════════════
+--           EXECUTION NOTIFICATION
+-- ════════════════════════════════════════════════════
+
+pcall(function()
+    StarterGui:SetCore("SendNotification", {
+        Title    = "✅ AimCore",
+        Text     = "SCRIPT EXECUTED — MADE BY THE AIMCORE OWNER @bqlsh",
+        Duration = 6,
+    })
+end)
+
+print("═══════════════════════════════════════")
+print("  AIMCORE MOD TRACKER — STARTED")
+print("  Made by the AimCore Owner @bqlsh")
+print("  Tracking " .. #MODS .. " moderators")
+print("  Check interval: " .. CHECK_INTERVAL .. "s")
+print("═══════════════════════════════════════")
+
+-- ════════════════════════════════════════════════════
+--               MAIN TRACKING LOOP
+-- ════════════════════════════════════════════════════
+
+local firstRun    = true
+local ticker      = 0
+
+-- Use a Heartbeat loop to avoid yielding the main thread
+RunService.Heartbeat:Connect(function(dt)
+    ticker = ticker + dt
+
+    -- Only run check every CHECK_INTERVAL seconds
+    if ticker < CHECK_INTERVAL and not firstRun then return end
+    ticker   = 0
+    firstRun = false
+
+    -- Spawn in new thread so we don't block game
+    task.spawn(function()
+        local presences = fetchPresences()
+        if not presences then
+            warn("[AimCore] Skipping update — could not fetch presences.")
+            return
+        end
+
+        local changed = detectChanges(presences)
+
+        -- Always update on first run, then only on changes
+        -- (or you can always update by removing the 'changed' check below)
+        if changed or webhookMessageId == nil then
+            local embed = buildEmbedContent(presences)
+            sendOrEditWebhook(embed)
+        end
+    end)
+end)
